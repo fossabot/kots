@@ -1,6 +1,7 @@
 package pull
 
 import (
+	"fmt"
 	"io/ioutil"
 	"net/url"
 	"path/filepath"
@@ -81,6 +82,8 @@ func CanPullUpstream(upstreamURI string, pullOptions PullOptions) (bool, error) 
 // Pull will download the application specified in upstreamURI using the options
 // specified in pullOptions. It returns the directory that the app was pulled to
 func Pull(upstreamURI string, pullOptions PullOptions) (string, error) {
+	fmt.Printf("+++++upstreamURI:%s\n", upstreamURI)
+	fmt.Printf("+++++pullOptions.LicenseFile:%s\n", pullOptions.LicenseFile)
 	log := logger.NewLogger()
 
 	if pullOptions.Silent {
@@ -130,6 +133,7 @@ func Pull(upstreamURI string, pullOptions PullOptions) (string, error) {
 
 	var images []image.Image
 	if pullOptions.RewriteImages {
+		// Rewrite all images
 		if pullOptions.RewriteImageOptions.ImageFiles == "" {
 			writeUpstreamImageOptions := upstream.WriteUpstreamImageOptions{
 				RootDir:      pullOptions.RootDir,
@@ -159,6 +163,21 @@ func Pull(upstreamURI string, pullOptions PullOptions) (string, error) {
 
 			images = rewrittenImages
 		}
+	} else if fetchOptions.License != nil {
+		// Rewrite private images
+		findPrivateImagesOptions := upstream.FindPrivateImagesOptions{
+			RootDir:            pullOptions.RootDir,
+			CreateAppDir:       pullOptions.CreateAppDir,
+			ReplicatedRegistry: registryEndpointFromLicense(fetchOptions.License),
+			Log:                log,
+		}
+		fmt.Printf("++++++findPrivateImagesOptions:%#v\n", findPrivateImagesOptions)
+		rewrittenImages, err := u.FindPrivateImages(findPrivateImagesOptions)
+		if err != nil {
+			return "", errors.Wrap(err, "failed to push upstream images")
+		}
+
+		images = rewrittenImages
 	}
 
 	renderOptions := base.RenderOptions{
@@ -244,6 +263,22 @@ func parseLicenseFromFile(filename string) (*kotsv1beta1.License, error) {
 	}
 
 	return license.(*kotsv1beta1.License), nil
+}
+
+func registryEndpointFromLicense(license *kotsv1beta1.License) string {
+	u, err := url.Parse(license.Spec.Endpoint)
+	if err != nil {
+		return "registry.replicated.com"
+	}
+
+	switch u.Hostname() {
+	case "staging.replicated.app":
+		return "registry.staging.replicated.com"
+	case "localhost":
+		return "localhost:1234"
+	default:
+		return "registry.replicated.com"
+	}
 }
 
 func imagesDirFromOptions(upstream *upstream.Upstream, pullOptions PullOptions) string {

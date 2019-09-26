@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"fmt"
 	"net/url"
 	"testing"
 
@@ -146,4 +147,15 @@ func Test_releaseToFiles(t *testing.T) {
 			assert.ElementsMatch(t, test.expected, actual)
 		})
 	}
+}
+
+func Test_parseDockerRef(t *testing.T) {
+	req := require.New(t)
+
+	ref1, err := parseDockerRef("429114214526.dkr.ecr.us-west-1.amazonaws.com/dmitriy:0.1")
+	req.NoError(err)
+	fmt.Printf("++++++ref1:%#v\n", ref1)
+	ref2, err := parseDockerRef("registry.replicated.com/appslug/proxy/429114214526.dkr.ecr.us-west-1.amazonaws.com/dmitriy:0.1")
+	req.NoError(err)
+	fmt.Printf("++++++ref2:%#v\n", ref2)
 }

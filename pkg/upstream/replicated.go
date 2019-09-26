@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -15,14 +16,20 @@ import (
 	"path/filepath"
 	"strings"
 
+	imagedocker "github.com/containers/image/docker"
+	imagetypes "github.com/containers/image/types"
+	"github.com/docker/distribution/registry/api/errcode"
 	"github.com/pkg/errors"
 	kotsv1beta1 "github.com/replicatedhq/kots/kotskinds/apis/kots/v1beta1"
 	kotsscheme "github.com/replicatedhq/kots/kotskinds/client/kotsclientset/scheme"
+	"github.com/replicatedhq/kots/pkg/image"
+	"github.com/replicatedhq/kots/pkg/logger"
 	"github.com/replicatedhq/kots/pkg/template"
 	"github.com/replicatedhq/kots/pkg/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/client-go/kubernetes/scheme"
+	kustomizeimage "sigs.k8s.io/kustomize/v3/pkg/image"
 )
 
 const DefaultMetadata = `apiVersion: kots.io/v1beta1
@@ -520,4 +527,83 @@ func getApplicationMetadataFromHost(host string, upstream *url.URL) ([]byte, err
 	defer getResp.Body.Close()
 
 	return nil, nil
+}
+
+type FindPrivateImagesOptions struct {
+	RootDir            string
+	CreateAppDir       bool
+	ReplicatedRegistry string
+	Log                *logger.Logger
+}
+
+func (u *Upstream) FindPrivateImages(options FindPrivateImagesOptions) ([]kustomizeimage.Image, error) {
+	rootDir := options.RootDir
+	if options.CreateAppDir {
+		rootDir = path.Join(rootDir, u.Name)
+	}
+	upstreamDir := path.Join(rootDir, "upstream")
+
+	upstreamImages, err := image.GetImages(upstreamDir)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to list upstream images")
+	}
+	fmt.Printf("++++++upstreamImages:%#v\n", upstreamImages)
+
+	result := make([]kustomizeimage.Image, 0)
+	for _, upstreamImage := range upstreamImages {
+		// ParseReference requires the // prefix
+		ref, err := imagedocker.ParseReference(fmt.Sprintf("//%s", upstreamImage))
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to parse image ref:%s", upstreamImage)
+		}
+
+		remoteImage, err := ref.NewImage(context.Background(), nil)
+		if err == nil {
+			remoteImage.Close()
+			continue
+		}
+
+		if !isUnauthorized(err) {
+			fmt.Printf("+++++not unauth err:%#v\n", err)
+			fmt.Printf("+++++not unauth err type:%T\n", err)
+			return nil, errors.Wrapf(err, "failed to create image from ref:%s", upstreamImage)
+		}
+
+		fmt.Printf("+++++unauth for:%s\n", upstreamImage)
+
+		image := kustomizeimage.Image{
+			Name: upstreamImage,
+		}
+		result = append(result, image)
+	}
+
+	return result, nil
+}
+
+func isUnauthorized(err error) bool {
+	if err == imagedocker.ErrUnauthorizedForCredentials {
+		return true
+	}
+
+	switch err := err.(type) {
+	case errcode.Errors:
+		for _, e := range err {
+			if isUnauthorized(e) {
+				return true
+			}
+		}
+	case errcode.Error:
+		return err.Code.Descriptor().HTTPStatusCode == http.StatusUnauthorized
+	}
+
+	cause := errors.Cause(err)
+	if cause == err {
+		return false
+	}
+
+	return isUnauthorized(cause)
+}
+
+func parseDockerRef(image string) (imagetypes.ImageReference, error) {
+	return imagedocker.ParseReference(fmt.Sprintf("//%s", image))
 }

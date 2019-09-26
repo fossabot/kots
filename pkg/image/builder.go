@@ -87,8 +87,68 @@ func SaveImages(log *logger.Logger, imagesDir string, upstreamDir string) error 
 	return nil
 }
 
+func GetImages(upstreamDir string) ([]string, error) {
+	uniqueImages := make(map[string]bool)
+
+	err := filepath.Walk(upstreamDir,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if info.IsDir() {
+				return nil
+			}
+
+			contents, err := ioutil.ReadFile(path)
+			if err != nil {
+				return err
+			}
+
+			images := listImagesInFile(contents)
+			for _, image := range images {
+				uniqueImages[image] = true
+			}
+			return nil
+		})
+
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to walk upstream dir")
+	}
+
+	result := make([]string, 0, len(uniqueImages))
+	for i := range uniqueImages {
+		result = append(result, i)
+	}
+
+	return result, nil
+}
+
 func extractImagesFromFile(log *logger.Logger, imagesDir string, fileData []byte, savedImages map[string]bool) error {
-	yamlDocs := bytes.Split(fileData, []byte("\n---\n"))
+	images := listImagesInFile(fileData)
+	for _, image := range images {
+		if _, saved := savedImages[image]; saved {
+			continue
+		}
+
+		log.ChildActionWithSpinner("Pulling image %s", image)
+		err := saveOneImage(imagesDir, image)
+		if err != nil {
+			log.FinishChildSpinner()
+			return errors.Wrap(err, "failed to save image")
+		}
+
+		log.FinishChildSpinner()
+		savedImages[image] = true
+	}
+
+	return nil
+}
+
+func listImagesInFile(contents []byte) []string {
+	images := make([]string, 0)
+
+	yamlDocs := bytes.Split(contents, []byte("\n---\n"))
 	for _, yamlDoc := range yamlDocs {
 		parsed := &k8sYAML{}
 		if err := yaml.Unmarshal(yamlDoc, parsed); err != nil {
@@ -96,23 +156,11 @@ func extractImagesFromFile(log *logger.Logger, imagesDir string, fileData []byte
 		}
 
 		for _, container := range parsed.Spec.Template.Spec.Containers {
-			if _, saved := savedImages[container.Image]; saved {
-				continue
-			}
-
-			log.ChildActionWithSpinner("Pulling image %s", container.Image)
-			err := saveOneImage(imagesDir, container.Image)
-			if err != nil {
-				log.FinishChildSpinner()
-				return errors.Wrap(err, "failed to save image")
-			}
-
-			log.FinishChildSpinner()
-			savedImages[container.Image] = true
+			images = append(images, container.Image)
 		}
 	}
 
-	return nil
+	return images
 }
 
 func saveOneImage(imagesDir string, image string) error {
